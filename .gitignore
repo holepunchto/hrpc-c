@@ -1,5 +1,6 @@
 node_modules/
 package-lock.json
+coverage/
 test/c-workspace/build/
 test/c-workspace/schema/
 test/c-workspace/hrpc/
