@@ -1,0 +1,8 @@
+node_modules/
+package-lock.json
+test/c-workspace/build/
+test/c-workspace/schema/
+test/c-workspace/hrpc/
+test/c-workspace/main.c
+test/c-workspace/CMakeLists.txt
+docs/superpowers/
