@@ -1,5 +1,9 @@
 {
   "name": "@hrpc-c/test-workspace",
   "version": "0.0.1",
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "bare-make": "^1.7.2",
+    "cmake-fetch": "^1.4.3"
+  }
 }
