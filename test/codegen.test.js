@@ -44,3 +44,36 @@ test('stream handler is rejected in this version', (t) => {
   })
   t.exception(() => generateC(hrpc, { schemaTarget: 'greeter_schema' }), /UNSUPPORTED_HANDLER/)
 })
+
+test('event handler does not throw', (t) => {
+  const schema = new Hyperschema()
+  const ns = schema.namespace('greeter')
+  ns.register({ name: 'ping', fields: [{ name: 'seq', type: 'uint', required: true }] })
+
+  const hrpc = new HRPC(schema, null, {})
+  hrpc.namespace('greeter').register({
+    name: 'ping',
+    request: { name: '@greeter/ping', send: true }
+  })
+  t.execution(() => generateC(hrpc, { schemaTarget: 'greeter_schema' }))
+})
+
+test('event handler emits void typedef and no response decoder', (t) => {
+  const schema = new Hyperschema()
+  const ns = schema.namespace('greeter')
+  ns.register({ name: 'ping', fields: [{ name: 'seq', type: 'uint', required: true }] })
+
+  const hrpc = new HRPC(schema, null, {})
+  hrpc.namespace('greeter').register({
+    name: 'ping',
+    request: { name: '@greeter/ping', send: true }
+  })
+  const { header, source } = generateC(hrpc, { schemaTarget: 'greeter_schema' })
+
+  // typedef is void return, no response/error params
+  t.ok(header.includes('typedef void (*greeter_on_ping)'), 'void handler typedef')
+  // no response decoder
+  t.absent(header.includes('greeter_decode_ping_response'), 'no response decoder')
+  // dispatch returns no_reply for events
+  t.ok(source.includes('hrpc_dispatch_no_reply'), 'dispatch returns no_reply')
+})

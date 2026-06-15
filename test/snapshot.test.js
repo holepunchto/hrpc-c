@@ -3,11 +3,11 @@ const Hyperschema = require('hyperschema')
 const CHRPC = require('..')
 
 // A schema exercising the generator's breadth: two namespaces (so the target
-// name joins them and command ids are global), several unary commands, and
-// request/response structs over different field types. The snapshot captures
-// the exact generated C, so any codegen change shows up as a reviewable diff.
-// Unlike the e2e test it needs no C toolchain, so it guards the generator
-// anywhere bare-make can't run.
+// name joins them and command ids are global), several unary commands, one
+// send-only event, and request/response structs over different field types.
+// The snapshot captures the exact generated C, so any codegen change shows up
+// as a reviewable diff. Unlike the e2e test it needs no C toolchain, so it
+// guards the generator anywhere bare-make can't run.
 // Refresh with `rm test/fixtures/snapshot.test.snapshot.cjs` and re-run.
 function buildHRPC() {
   const schema = new Hyperschema()
@@ -24,6 +24,10 @@ function buildHRPC() {
   greeter.register({
     name: 'echo',
     fields: [{ name: 'text', type: 'string', required: true }]
+  })
+  greeter.register({
+    name: 'ping',
+    fields: [{ name: 'seq', type: 'uint', required: true }]
   })
 
   const admin = schema.namespace('admin')
@@ -49,6 +53,10 @@ function buildHRPC() {
     name: 'echo',
     request: { name: '@greeter/echo', stream: false },
     response: { name: '@greeter/echo', stream: false }
+  })
+  hrpc.namespace('greeter').register({
+    name: 'ping',
+    request: { name: '@greeter/ping', send: true }
   })
   hrpc.namespace('admin').register({
     name: 'ban',
