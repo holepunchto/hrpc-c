@@ -1,15 +1,12 @@
 const test = require('brittle')
 const path = require('path')
 const fs = require('fs')
-const os = require('os')
 const c = require('compact-encoding')
 const m = require('bare-rpc/messages')
 const Hyperschema = require('hyperschema')
 const CHyperschema = require('hyperschema-c')
 const CHRPC = require('..')
 const { runC, toCArray, parseBytes } = require('./helpers/c')
-
-const skip = os.platform() === 'win32'
 
 // --- JS-side real generated codecs (generate to disk, require back) ---
 // Must live inside the repo module tree so the generated index.js can resolve
@@ -36,7 +33,7 @@ function jsCodecs() {
   }
 }
 
-const codecs = skip ? null : jsCodecs()
+const codecs = jsCodecs()
 
 // --- C-side schema + hrpc (mirrors the JS definitions and test/c.test.js) ---
 function buildGreeter() {
@@ -93,7 +90,7 @@ static void print_bytes (const uint8_t *buf, size_t len) {
 }
 `
 
-test('interop: JS unary request -> C dispatch -> C response -> JS decode', { skip }, (t) => {
+test('interop: JS unary request -> C dispatch -> C response -> JS decode', (t) => {
   const { schema, hrpc } = buildGreeter()
 
   const payload = Buffer.from(c.encode(codecs.helloRequest, { id: 42 }))
@@ -139,7 +136,7 @@ main (void) {
   t.is(c.decode(codecs.helloResponse, msg.data).greeting, 142, 'greeting = 42 + 100')
 })
 
-test('interop: JS unary request -> C error response -> JS decode', { skip }, (t) => {
+test('interop: JS unary request -> C error response -> JS decode', (t) => {
   const { schema, hrpc } = buildGreeter()
 
   const payload = Buffer.from(c.encode(codecs.helloRequest, { id: 0 })) // 0 triggers error
@@ -192,7 +189,7 @@ main (void) {
   t.is(msg.error.errno, 400, 'C status maps to JS errno')
 })
 
-test('interop: JS event frame -> C dispatch', { skip }, (t) => {
+test('interop: JS event frame -> C dispatch', (t) => {
   const { schema, hrpc } = buildGreeter()
 
   const payload = Buffer.from(c.encode(codecs.ping, { seq: 77 }))
@@ -236,7 +233,7 @@ main (void) {
   t.is(res.stdout.trim(), '77', 'C event handler received seq = 77')
 })
 
-test('interop: C event frame -> JS decode', { skip }, (t) => {
+test('interop: C event frame -> JS decode', (t) => {
   const { schema, hrpc } = buildGreeter()
 
   const main = `${PREAMBLE}
@@ -261,7 +258,7 @@ main (void) {
   t.is(c.decode(codecs.ping, msg.data).seq, 55, 'C-encoded event payload decoded in JS')
 })
 
-test('interop: C unary request frame -> JS decode', { skip }, (t) => {
+test('interop: C unary request frame -> JS decode', (t) => {
   const { schema, hrpc } = buildGreeter()
 
   const main = `${PREAMBLE}
@@ -286,7 +283,7 @@ main (void) {
   t.is(c.decode(codecs.helloRequest, msg.data).id, 33, 'C-encoded request payload decoded in JS')
 })
 
-test('interop: JS success response -> C decode', { skip }, (t) => {
+test('interop: JS success response -> C decode', (t) => {
   const { schema, hrpc } = buildGreeter()
 
   const payload = Buffer.from(c.encode(codecs.helloResponse, { greeting: 777 }))
