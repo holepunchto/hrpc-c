@@ -129,3 +129,56 @@ main (void) {
   t.is(msg.id, 7, 'response id matches request id')
   t.is(c.decode(codecs.helloResponse, msg.data).greeting, 142, 'greeting = 42 + 100')
 })
+
+test('interop: JS unary request -> C error response -> JS decode', { skip }, (t) => {
+  const { schema, hrpc } = buildGreeter()
+
+  const payload = Buffer.from(c.encode(codecs.helloRequest, { id: 0 })) // 0 triggers error
+  const frame = encodeRequest(5, 0, payload)
+
+  const main = `${PREAMBLE}
+static int
+on_hello (void *ctx, const greeter_hello_request_t *req, greeter_hello_response_t *res, hrpc_error_t *error) {
+  (void) ctx; (void) res;
+  if (req->id == 0) {
+    error->message = (utf8_string_view_t){ (const utf8_t *) "bad id", 6 };
+    error->code = (utf8_string_view_t){ (const utf8_t *) "BAD_ID", 6 };
+    error->status = 400;
+    return hrpc_error_response;
+  }
+  res->greeting = req->id + 100;
+  return hrpc_ok;
+}
+
+static void
+on_ping (void *ctx, const greeter_ping_t *req) { (void) ctx; (void) req; }
+
+int
+main (void) {
+  uint8_t input[] = {${toCArray(frame)}};
+
+  compact_state_t in = {0, sizeof(input), input};
+  rpc_message_t reqmsg; memset(&reqmsg, 0, sizeof(reqmsg));
+  assert(rpc_decode_message(&in, &reqmsg) == 0);
+
+  greeter_hrpc_handlers_t handlers = { .ctx = NULL, .on_hello = on_hello, .on_ping = on_ping };
+  uint8_t *reply = NULL; size_t reply_len = 0;
+  assert(greeter_hrpc_dispatch(&handlers, &reqmsg, &reply, &reply_len) == hrpc_dispatch_reply);
+
+  print_bytes(reply, reply_len);
+  free(reply);
+  return 0;
+}
+`
+
+  const res = runC(schema, hrpc, main)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+
+  const msg = decodeFrame(parseBytes(res.stdout))
+  t.is(msg.type, 2, 'response type')
+  t.is(msg.id, 5, 'error response id matches request id')
+  t.ok(msg.error instanceof Error, 'decoded as an error')
+  t.is(msg.error.message, 'bad id', 'error message crosses the boundary')
+  t.is(msg.error.code, 'BAD_ID', 'error code crosses the boundary')
+  t.is(msg.error.errno, 400, 'C status maps to JS errno')
+})
