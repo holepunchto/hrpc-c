@@ -66,6 +66,10 @@ function encodeRequest(id, command, payload) {
   return payload ? Buffer.concat([header, payload]) : Buffer.from(header)
 }
 
+function encodeEvent(command, payload) {
+  return encodeRequest(0, command, payload)
+}
+
 function decodeFrame(buf) {
   return m.message.decode(c.state(0, buf.length, buf))
 }
@@ -181,4 +185,48 @@ main (void) {
   t.is(msg.error.message, 'bad id', 'error message crosses the boundary')
   t.is(msg.error.code, 'BAD_ID', 'error code crosses the boundary')
   t.is(msg.error.errno, 400, 'C status maps to JS errno')
+})
+
+test('interop: JS event frame -> C dispatch', { skip }, (t) => {
+  const { schema, hrpc } = buildGreeter()
+
+  const payload = Buffer.from(c.encode(codecs.ping, { seq: 77 }))
+  const frame = encodeEvent(1, payload) // id 0, command greeter_command_ping = 1
+
+  const main = `${PREAMBLE}
+static unsigned long long g_seq = 0;
+static int g_called = 0;
+
+static int
+on_hello (void *ctx, const greeter_hello_request_t *req, greeter_hello_response_t *res, hrpc_error_t *error) {
+  (void) ctx; (void) req; (void) res; (void) error; return hrpc_ok;
+}
+
+static void
+on_ping (void *ctx, const greeter_ping_t *req) { (void) ctx; g_called = 1; g_seq = req->seq; }
+
+int
+main (void) {
+  uint8_t input[] = {${toCArray(frame)}};
+
+  compact_state_t in = {0, sizeof(input), input};
+  rpc_message_t reqmsg; memset(&reqmsg, 0, sizeof(reqmsg));
+  assert(rpc_decode_message(&in, &reqmsg) == 0);
+  assert(reqmsg.type == rpc_request);
+  assert(reqmsg.id == 0);
+  assert(reqmsg.command == greeter_command_ping);
+
+  greeter_hrpc_handlers_t handlers = { .ctx = NULL, .on_hello = on_hello, .on_ping = on_ping };
+  uint8_t *reply = NULL; size_t reply_len = 0;
+  assert(greeter_hrpc_dispatch(&handlers, &reqmsg, &reply, &reply_len) == hrpc_dispatch_no_reply);
+  assert(g_called == 1);
+
+  printf("%llu\\n", g_seq);
+  return 0;
+}
+`
+
+  const res = runC(schema, hrpc, main)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+  t.is(res.stdout.trim(), '77', 'C event handler received seq = 77')
 })
