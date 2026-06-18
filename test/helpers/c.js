@@ -74,7 +74,13 @@ function runC(schema, hrpc, mainC) {
   const run = spawnSync(exe, [], { encoding: 'utf8', timeout: 10000 })
   if (run.error) return { ok: false, stderr: run.error.message }
 
-  return { ok: run.status === 0, stdout: run.stdout || '', stderr: run.stderr || '' }
+  // bare-subprocess does not honor the `encoding` option the way Node does, so
+  // stdout/stderr can come back as Buffers; normalize to strings for callers.
+  return {
+    ok: run.status === 0,
+    stdout: run.stdout ? run.stdout.toString() : '',
+    stderr: run.stderr ? run.stderr.toString() : ''
+  }
 }
 
 // Format a Buffer as the body of a C array initializer: "1, 42, 0".

@@ -70,6 +70,11 @@ function encodeEvent(command, payload) {
   return encodeRequest(0, command, payload)
 }
 
+function encodeResponse(id, payload) {
+  const header = c.encode(m.header, { type: 2, id, error: null, stream: 0, data: payload })
+  return payload ? Buffer.concat([header, payload]) : Buffer.from(header)
+}
+
 function decodeFrame(buf) {
   return m.message.decode(c.state(0, buf.length, buf))
 }
@@ -279,4 +284,36 @@ main (void) {
   t.is(msg.id, 9, 'request id')
   t.is(msg.command, 0, 'command is greeter_command_hello')
   t.is(c.decode(codecs.helloRequest, msg.data).id, 33, 'C-encoded request payload decoded in JS')
+})
+
+test('interop: JS success response -> C decode', { skip }, (t) => {
+  const { schema, hrpc } = buildGreeter()
+
+  const payload = Buffer.from(c.encode(codecs.helloResponse, { greeting: 777 }))
+  const frame = encodeResponse(11, payload)
+
+  const main = `${PREAMBLE}
+int
+main (void) {
+  uint8_t input[] = {${toCArray(frame)}};
+
+  compact_state_t in = {0, sizeof(input), input};
+  rpc_message_t respmsg; memset(&respmsg, 0, sizeof(respmsg));
+  assert(rpc_decode_message(&in, &respmsg) == 0);
+  assert(respmsg.type == rpc_response);
+  assert(respmsg.id == 11);
+
+  greeter_hello_response_t result; memset(&result, 0, sizeof(result));
+  hrpc_error_t error; memset(&error, 0, sizeof(error));
+  assert(greeter_decode_hello_response(&respmsg, &result, &error) == hrpc_ok);
+  assert(result.greeting == 777);
+
+  printf("%llu\\n", (unsigned long long) result.greeting);
+  return 0;
+}
+`
+
+  const res = runC(schema, hrpc, main)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+  t.is(res.stdout.trim(), '777', 'JS-encoded response decoded by C')
 })
