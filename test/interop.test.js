@@ -255,3 +255,28 @@ main (void) {
   t.is(msg.command, 1, 'command is greeter_command_ping')
   t.is(c.decode(codecs.ping, msg.data).seq, 55, 'C-encoded event payload decoded in JS')
 })
+
+test('interop: C unary request frame -> JS decode', { skip }, (t) => {
+  const { schema, hrpc } = buildGreeter()
+
+  const main = `${PREAMBLE}
+int
+main (void) {
+  greeter_hello_request_t args = { .id = 33 };
+  uint8_t *buf = NULL; size_t len = 0;
+  assert(greeter_encode_hello(9, &args, &buf, &len) == 0);
+  print_bytes(buf, len);
+  free(buf);
+  return 0;
+}
+`
+
+  const res = runC(schema, hrpc, main)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+
+  const msg = decodeFrame(parseBytes(res.stdout))
+  t.is(msg.type, 1, 'request type')
+  t.is(msg.id, 9, 'request id')
+  t.is(msg.command, 0, 'command is greeter_command_hello')
+  t.is(c.decode(codecs.helloRequest, msg.data).id, 33, 'C-encoded request payload decoded in JS')
+})
