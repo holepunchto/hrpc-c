@@ -77,4 +77,15 @@ function runC(schema, hrpc, mainC) {
   return { ok: run.status === 0, stdout: run.stdout || '', stderr: run.stderr || '' }
 }
 
-module.exports = { runC }
+// Format a Buffer as the body of a C array initializer: "1, 42, 0".
+function toCArray(buf) {
+  return Array.from(buf).join(', ')
+}
+
+// Parse a space-separated decimal byte line (the C driver's stdout) into a Buffer.
+function parseBytes(line) {
+  const parts = line.trim().split(/\s+/).filter(Boolean)
+  return Buffer.from(parts.map(Number))
+}
+
+module.exports = { runC, toCArray, parseBytes }

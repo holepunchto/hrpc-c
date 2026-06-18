@@ -1,2 +1,2 @@
-*.snapshot.*
+node_modules/
 test/c-workspace/js-schema/

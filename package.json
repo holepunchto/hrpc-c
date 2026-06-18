@@ -61,8 +61,10 @@
   "devDependencies": {
     "bare-os": "^3.9.1",
     "bare-path": "^3.0.0",
+    "bare-rpc": "^1.0.0",
     "bare-subprocess": "^6.0.0",
     "brittle": "^3.7.0",
+    "compact-encoding": "^3.0.0",
     "hyperschema": "^1.20.1",
     "hyperschema-c": "^0.4.0",
     "lunte": "^1.8.0",
