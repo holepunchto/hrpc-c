@@ -1,10 +1,8 @@
 node_modules/
 package-lock.json
 coverage/
-test/c-workspace/build/
-test/c-workspace/schema/
-test/c-workspace/hrpc/
-test/c-workspace/main.c
-test/c-workspace/CMakeLists.txt
 docs/superpowers/
-test/c-workspace/js-schema/
+
+# c-workspace is a build sandbox; only its package.json is tracked
+test/c-workspace/*
+!test/c-workspace/package.json
