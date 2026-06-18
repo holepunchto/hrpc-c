@@ -230,3 +230,28 @@ main (void) {
   t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
   t.is(res.stdout.trim(), '77', 'C event handler received seq = 77')
 })
+
+test('interop: C event frame -> JS decode', { skip }, (t) => {
+  const { schema, hrpc } = buildGreeter()
+
+  const main = `${PREAMBLE}
+int
+main (void) {
+  greeter_ping_t args = { .seq = 55 };
+  uint8_t *buf = NULL; size_t len = 0;
+  assert(greeter_encode_ping(&args, &buf, &len) == 0);
+  print_bytes(buf, len);
+  free(buf);
+  return 0;
+}
+`
+
+  const res = runC(schema, hrpc, main)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+
+  const msg = decodeFrame(parseBytes(res.stdout))
+  t.is(msg.type, 1, 'event is a request frame')
+  t.is(msg.id, 0, 'event id is 0')
+  t.is(msg.command, 1, 'command is greeter_command_ping')
+  t.is(c.decode(codecs.ping, msg.data).seq, 55, 'C-encoded event payload decoded in JS')
+})
