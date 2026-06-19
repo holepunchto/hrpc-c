@@ -119,3 +119,129 @@ test('response-stream compiles and round-trips through generated C', { timeout: 
   const res = runC(schema, hrpc, MAIN_C)
   t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
 })
+
+function buildCollect() {
+  const schema = CHyperschema.from(null)
+  const ns = schema.namespace('greeter')
+  ns.register({
+    name: 'collect-request',
+    fields: [{ name: 'value', type: 'uint', required: true }]
+  })
+  ns.register({
+    name: 'collect-response',
+    fields: [{ name: 'total', type: 'uint', required: true }]
+  })
+  const hrpc = new CHRPC(schema, null, {})
+  hrpc.namespace('greeter').register({
+    name: 'collect',
+    request: { name: '@greeter/collect-request', stream: true },
+    response: { name: '@greeter/collect-response', stream: false }
+  })
+  return { schema, hrpc }
+}
+
+const COLLECT_MAIN_C = `
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include "greeter_hrpc.h"
+
+static uint64_t g_stream_id = 0;
+
+static int
+on_collect (void *ctx, uint64_t stream_id) {
+  (void) ctx;
+  g_stream_id = stream_id;
+  return 0;
+}
+
+static void
+roundtrip (uint8_t *buf, size_t len, rpc_message_t *out) {
+  compact_state_t in = {0, len, buf};
+  memset(out, 0, sizeof(*out));
+  assert(rpc_decode_message(&in, out) == 0);
+}
+
+int
+main (void) {
+  uint8_t *buf = NULL;
+  size_t len = 0;
+  rpc_message_t m;
+
+  // dispatch: a collect OPEN frame routes to on_collect(ctx, stream_id) with no payload decode
+  assert(greeter_encode_collect_open(9, &buf, &len) == 0);
+  compact_state_t rin = {0, len, buf};
+  rpc_message_t reqmsg; memset(&reqmsg, 0, sizeof(reqmsg));
+  assert(rpc_decode_message(&rin, &reqmsg) == 0);
+  assert(reqmsg.type == rpc_request);
+  assert(reqmsg.command == greeter_command_collect);
+  assert(reqmsg.stream == rpc_stream_open);
+
+  greeter_hrpc_handlers_t handlers = { .ctx = NULL, .on_collect = on_collect };
+  uint8_t *reply = NULL; size_t reply_len = 0;
+  assert(greeter_hrpc_dispatch(&handlers, &reqmsg, &reply, &reply_len) == hrpc_dispatch_stream);
+  assert(g_stream_id == 9);
+  assert(reply == NULL);
+  assert(reply_len == 0);
+  free(buf); buf = NULL;
+
+  // open echo: rpc_stream, stream=request|open
+  assert(greeter_encode_collect_stream_open(9, &buf, &len) == 0);
+  roundtrip(buf, len, &m); free(buf); buf = NULL;
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_request | rpc_stream_open));
+
+  // chunk: rpc_stream, stream=request|data, payload decodes
+  greeter_collect_request_t chunk = { .value = 12 };
+  assert(greeter_encode_collect_chunk(9, &chunk, &buf, &len) == 0);
+  roundtrip(buf, len, &m);
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_request | rpc_stream_data));
+  greeter_collect_request_t got = {0};
+  assert(greeter_decode_collect_chunk(&m, &got) == 0);
+  assert(got.value == 12);
+  free(buf); buf = NULL;
+
+  // end: rpc_stream, stream=request|end
+  assert(greeter_encode_collect_end(9, &buf, &len) == 0);
+  roundtrip(buf, len, &m); free(buf); buf = NULL;
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_request | rpc_stream_end));
+
+  // response: rpc_response, stream 0, decodes via decode_collect_response
+  greeter_collect_response_t res = { .total = 30 };
+  assert(greeter_encode_collect_response(9, &res, &buf, &len) == 0);
+  roundtrip(buf, len, &m);
+  assert(m.type == rpc_response);
+  assert(m.stream == 0);
+  greeter_collect_response_t out = {0};
+  hrpc_error_t derr = {0};
+  assert(greeter_decode_collect_response(&m, &out, &derr) == hrpc_ok);
+  assert(out.total == 30);
+  free(buf); buf = NULL;
+
+  // error: rpc_response, error=true, decodes as hrpc_error_response
+  hrpc_error_t error = {0};
+  error.message = (utf8_string_view_t){ (const utf8_t *) "nope", 4 };
+  error.code = (utf8_string_view_t){ (const utf8_t *) "NO", 2 };
+  error.status = 409;
+  assert(greeter_encode_collect_error(9, error, &buf, &len) == 0);
+  roundtrip(buf, len, &m);
+  assert(m.type == rpc_response);
+  assert(m.error == true);
+  greeter_collect_response_t out2 = {0};
+  hrpc_error_t derr2 = {0};
+  assert(greeter_decode_collect_response(&m, &out2, &derr2) == hrpc_error_response);
+  assert(derr2.status == 409);
+  assert(derr2.code.len == 2 && memcmp(derr2.code.data, "NO", 2) == 0);
+  free(buf); buf = NULL;
+
+  return 0;
+}
+`
+
+test('request-stream compiles and round-trips through generated C', { timeout: 200000 }, (t) => {
+  const { schema, hrpc } = buildCollect()
+  const res = runC(schema, hrpc, COLLECT_MAIN_C)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+})
