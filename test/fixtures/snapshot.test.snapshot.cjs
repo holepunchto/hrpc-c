@@ -152,7 +152,7 @@ typedef struct {
 
 // Dispatch one decoded request. Returns hrpc_dispatch_reply (sets
 // *reply_out / *reply_len, caller sends then frees), hrpc_dispatch_no_reply,
-// or < 0 (no reply written).
+// hrpc_dispatch_stream, or < 0 (no reply written).
 int
 greeter_admin_hrpc_dispatch (const greeter_admin_hrpc_handlers_t *handlers, const rpc_message_t *msg, uint8_t **reply_out, size_t *reply_len);
 
