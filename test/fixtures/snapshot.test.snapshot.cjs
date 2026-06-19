@@ -29,6 +29,7 @@ enum {
 enum {
   hrpc_dispatch_reply = 0,
   hrpc_dispatch_no_reply = 1,
+  hrpc_dispatch_stream = 2,
 };
 
 // error codes (< 0), distinct from librpc rpc_error / rpc_partial
@@ -56,7 +57,8 @@ enum {
   greeter_command_hello = 0,
   greeter_command_echo = 1,
   greeter_command_ping = 2,
-  admin_command_ban = 3,
+  greeter_command_watch = 3,
+  admin_command_ban = 4,
 };
 
 // @greeter/hello (unary)
@@ -93,6 +95,38 @@ greeter_encode_ping (const greeter_ping_t *args, uint8_t **out, size_t *out_len)
 
 typedef void (*greeter_on_ping) (void *ctx, const greeter_ping_t *req);
 
+// @greeter/watch (response-stream)
+int
+greeter_encode_watch (uint64_t id, const greeter_watch_request_t *args, uint8_t **out, size_t *out_len);
+
+// server: open the response stream (rpc_response, stream=open)
+int
+greeter_encode_watch_open (uint64_t id, uint8_t **out, size_t *out_len);
+
+// client: echo the open back (rpc_stream, stream=response|open) so the peer unblocks
+int
+greeter_encode_watch_stream_open (uint64_t id, uint8_t **out, size_t *out_len);
+
+// server: one data chunk (rpc_stream, stream=response|data)
+int
+greeter_encode_watch_chunk (uint64_t id, const greeter_log_event_t *chunk, uint8_t **out, size_t *out_len);
+
+// server: end the stream (rpc_stream, stream=response|end)
+int
+greeter_encode_watch_end (uint64_t id, uint8_t **out, size_t *out_len);
+
+// server: error the stream (rpc_stream, stream=response|close|error)
+int
+greeter_encode_watch_error (uint64_t id, hrpc_error_t error, uint8_t **out, size_t *out_len);
+
+// client: decode one data chunk payload. Caller has confirmed msg->stream & rpc_stream_data.
+int
+greeter_decode_watch_chunk (const rpc_message_t *msg, greeter_log_event_t *out);
+
+// Return 0 to accept the stream (dispatch yields hrpc_dispatch_stream); < 0 to reject.
+// stream_id == the request id; pass it to the encoders above.
+typedef int (*greeter_on_watch) (void *ctx, const greeter_watch_request_t *req, uint64_t stream_id);
+
 // @admin/ban (unary)
 int
 admin_encode_ban (uint64_t id, const admin_ban_request_t *args, uint8_t **out, size_t *out_len);
@@ -112,6 +146,7 @@ typedef struct {
   greeter_on_hello on_hello;
   greeter_on_echo on_echo;
   greeter_on_ping on_ping;
+  greeter_on_watch on_watch;
   admin_on_ban on_ban;
 } greeter_admin_hrpc_handlers_t;
 
@@ -284,6 +319,109 @@ greeter_encode_ping (const greeter_ping_t *args, uint8_t **out, size_t *out_len)
   err = greeter_admin_hrpc__frame(&msg, out, out_len);
   free(payload.buffer);
   return err;
+}
+
+int
+greeter_encode_watch (uint64_t id, const greeter_watch_request_t *args, uint8_t **out, size_t *out_len) {
+  compact_state_t payload = {0, 0, NULL};
+  int err = greeter_watch_request_preencode(&payload, args);
+  if (err < 0) return hrpc_err_decode;
+  if (payload.end > 0) {
+    payload.buffer = malloc(payload.end);
+    if (payload.buffer == NULL) return hrpc_err_alloc;
+    err = greeter_watch_request_encode(&payload, args);
+    if (err < 0) {
+      free(payload.buffer);
+      return hrpc_err_decode;
+    }
+  }
+
+  rpc_message_t msg = {0};
+  msg.type = rpc_request;
+  msg.id = id;
+  msg.command = greeter_command_watch;
+  msg.stream = 0;
+  msg.data = payload.buffer;
+  msg.len = payload.end;
+
+  err = greeter_admin_hrpc__frame(&msg, out, out_len);
+  free(payload.buffer);
+  return err;
+}
+
+int
+greeter_encode_watch_open (uint64_t id, uint8_t **out, size_t *out_len) {
+  rpc_message_t msg = {0};
+  msg.type = rpc_response;
+  msg.id = id;
+  msg.error = false;
+  msg.stream = rpc_stream_open;
+  return greeter_admin_hrpc__frame(&msg, out, out_len);
+}
+
+int
+greeter_encode_watch_stream_open (uint64_t id, uint8_t **out, size_t *out_len) {
+  rpc_message_t msg = {0};
+  msg.type = rpc_stream;
+  msg.id = id;
+  msg.stream = rpc_stream_response | rpc_stream_open;
+  return greeter_admin_hrpc__frame(&msg, out, out_len);
+}
+
+int
+greeter_encode_watch_chunk (uint64_t id, const greeter_log_event_t *chunk, uint8_t **out, size_t *out_len) {
+  compact_state_t payload = {0, 0, NULL};
+  int err = greeter_log_event_preencode(&payload, chunk);
+  if (err < 0) return hrpc_err_decode;
+  if (payload.end > 0) {
+    payload.buffer = malloc(payload.end);
+    if (payload.buffer == NULL) return hrpc_err_alloc;
+    err = greeter_log_event_encode(&payload, chunk);
+    if (err < 0) {
+      free(payload.buffer);
+      return hrpc_err_decode;
+    }
+  }
+
+  rpc_message_t msg = {0};
+  msg.type = rpc_stream;
+  msg.id = id;
+  msg.stream = rpc_stream_response | rpc_stream_data;
+  msg.data = payload.buffer;
+  msg.len = payload.end;
+
+  err = greeter_admin_hrpc__frame(&msg, out, out_len);
+  free(payload.buffer);
+  return err;
+}
+
+int
+greeter_encode_watch_end (uint64_t id, uint8_t **out, size_t *out_len) {
+  rpc_message_t msg = {0};
+  msg.type = rpc_stream;
+  msg.id = id;
+  msg.stream = rpc_stream_response | rpc_stream_end;
+  return greeter_admin_hrpc__frame(&msg, out, out_len);
+}
+
+int
+greeter_encode_watch_error (uint64_t id, hrpc_error_t error, uint8_t **out, size_t *out_len) {
+  rpc_message_t msg = {0};
+  msg.type = rpc_stream;
+  msg.id = id;
+  msg.stream = rpc_stream_response | rpc_stream_close | rpc_stream_error;
+  msg.message = error.message;
+  msg.code = error.code;
+  msg.status = error.status;
+  return greeter_admin_hrpc__frame(&msg, out, out_len);
+}
+
+int
+greeter_decode_watch_chunk (const rpc_message_t *msg, greeter_log_event_t *out) {
+  compact_state_t payload = {0, msg->len, msg->data};
+  int err = greeter_log_event_decode(&payload, out);
+  if (err < 0) return hrpc_err_decode;
+  return 0;
 }
 
 int
@@ -462,6 +600,16 @@ greeter_admin_hrpc_dispatch (const greeter_admin_hrpc_handlers_t *handlers, cons
     handlers->on_ping(handlers->ctx, &req);
     greeter_ping_destroy(&req);
     return hrpc_dispatch_no_reply;
+  }
+  case greeter_command_watch: {
+    if (handlers->on_watch == NULL) return hrpc_err_unknown;
+    greeter_watch_request_t req = {0};
+    compact_state_t in = {0, msg->len, msg->data};
+    if (greeter_watch_request_decode(&in, &req) < 0) return hrpc_err_decode;
+    int r = handlers->on_watch(handlers->ctx, &req, msg->id);
+    greeter_watch_request_destroy(&req);
+    if (r < 0) return r;
+    return hrpc_dispatch_stream;
   }
   case admin_command_ban: {
     if (handlers->on_ban == NULL) return hrpc_err_unknown;

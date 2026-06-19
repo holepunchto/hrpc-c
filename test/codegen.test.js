@@ -31,18 +31,92 @@ test('duplicate command short-name throws', (t) => {
   t.exception(() => generateC(hrpc, { schemaTarget: 'greeter_schema' }), /DUPLICATE_COMMAND_NAME/)
 })
 
-test('stream handler is rejected in this version', (t) => {
+test('request-stream handler is rejected in this version', (t) => {
   const schema = new Hyperschema()
   const ns = schema.namespace('greeter')
   ns.register({ name: 'tick', fields: [{ name: 'n', type: 'uint', required: true }] })
 
   const hrpc = new HRPC(schema, null, {})
   hrpc.namespace('greeter').register({
-    name: 'watch',
-    request: { name: '@greeter/tick', stream: false },
+    name: 'feed',
+    request: { name: '@greeter/tick', stream: true },
+    response: { name: '@greeter/tick', stream: false }
+  })
+  t.exception(() => generateC(hrpc, { schemaTarget: 'greeter_schema' }), /UNSUPPORTED_HANDLER/)
+})
+
+test('duplex handler is rejected in this version', (t) => {
+  const schema = new Hyperschema()
+  const ns = schema.namespace('greeter')
+  ns.register({ name: 'tick', fields: [{ name: 'n', type: 'uint', required: true }] })
+
+  const hrpc = new HRPC(schema, null, {})
+  hrpc.namespace('greeter').register({
+    name: 'pipe',
+    request: { name: '@greeter/tick', stream: true },
     response: { name: '@greeter/tick', stream: true }
   })
   t.exception(() => generateC(hrpc, { schemaTarget: 'greeter_schema' }), /UNSUPPORTED_HANDLER/)
+})
+
+test('response-stream: classify and generated declarations', (t) => {
+  const schema = new Hyperschema()
+  const ns = schema.namespace('greeter')
+  ns.register({ name: 'watch-request', fields: [{ name: 'since', type: 'uint', required: true }] })
+  ns.register({ name: 'log-event', fields: [{ name: 'seq', type: 'uint', required: true }] })
+
+  const hrpc = new HRPC(schema, null, {})
+  hrpc.namespace('greeter').register({
+    name: 'watch',
+    request: { name: '@greeter/watch-request', stream: false },
+    response: { name: '@greeter/log-event', stream: true }
+  })
+
+  const { shared, header, source } = generateC(hrpc, { schemaTarget: 'greeter_schema' })
+
+  t.ok(shared.includes('hrpc_dispatch_stream = 2'), 'shared header adds stream dispatch code')
+  t.ok(
+    header.includes('greeter_encode_watch (uint64_t id, const greeter_watch_request_t *args'),
+    'request encoder declared'
+  )
+  t.ok(header.includes('greeter_encode_watch_open (uint64_t id'), 'open encoder declared')
+  t.ok(
+    header.includes('greeter_encode_watch_stream_open (uint64_t id'),
+    'open-echo encoder declared'
+  )
+  t.ok(
+    header.includes('greeter_encode_watch_chunk (uint64_t id, const greeter_log_event_t *chunk'),
+    'chunk encoder declared'
+  )
+  t.ok(header.includes('greeter_encode_watch_end (uint64_t id'), 'end encoder declared')
+  t.ok(
+    header.includes('greeter_encode_watch_error (uint64_t id, hrpc_error_t error'),
+    'error encoder declared'
+  )
+  t.ok(
+    header.includes(
+      'greeter_decode_watch_chunk (const rpc_message_t *msg, greeter_log_event_t *out'
+    ),
+    'chunk decoder declared'
+  )
+  t.ok(
+    header.includes(
+      '(*greeter_on_watch) (void *ctx, const greeter_watch_request_t *req, uint64_t stream_id)'
+    ),
+    'handler typedef'
+  )
+  t.ok(source.includes('msg.stream = rpc_stream_open;'), 'open uses OPEN')
+  t.ok(
+    source.includes('msg.stream = rpc_stream_response | rpc_stream_open;'),
+    'open echo uses RESPONSE|OPEN'
+  )
+  t.ok(source.includes('rpc_stream_response | rpc_stream_data'), 'chunk uses RESPONSE|DATA')
+  t.ok(source.includes('rpc_stream_response | rpc_stream_end'), 'end uses RESPONSE|END')
+  t.ok(
+    source.includes('rpc_stream_response | rpc_stream_close | rpc_stream_error'),
+    'error uses RESPONSE|CLOSE|ERROR'
+  )
+  t.ok(source.includes('return hrpc_dispatch_stream;'), 'dispatch returns stream code')
 })
 
 test('event handler does not throw', (t) => {
