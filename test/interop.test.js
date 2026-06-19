@@ -24,12 +24,15 @@ function jsCodecs() {
     fields: [{ name: 'greeting', type: 'uint', required: true }]
   })
   ns.register({ name: 'ping', fields: [{ name: 'seq', type: 'uint', required: true }] })
+  ns.register({ name: 'watch-request', fields: [{ name: 'since', type: 'uint', required: true }] })
+  ns.register({ name: 'log-event', fields: [{ name: 'seq', type: 'uint', required: true }] })
   Hyperschema.toDisk(schema)
   const mod = require(path.join(JS_SCHEMA_DIR, 'index.js'))
   return {
     helloRequest: mod.getEncoding('@greeter/hello-request'),
     helloResponse: mod.getEncoding('@greeter/hello-response'),
-    ping: mod.getEncoding('@greeter/ping')
+    ping: mod.getEncoding('@greeter/ping'),
+    logEvent: mod.getEncoding('@greeter/log-event')
   }
 }
 
@@ -45,6 +48,8 @@ function buildGreeter() {
     fields: [{ name: 'greeting', type: 'uint', required: true }]
   })
   ns.register({ name: 'ping', fields: [{ name: 'seq', type: 'uint', required: true }] })
+  ns.register({ name: 'watch-request', fields: [{ name: 'since', type: 'uint', required: true }] })
+  ns.register({ name: 'log-event', fields: [{ name: 'seq', type: 'uint', required: true }] })
   const hrpc = new CHRPC(schema, null, {})
   const h = hrpc.namespace('greeter')
   h.register({
@@ -53,6 +58,11 @@ function buildGreeter() {
     response: { name: '@greeter/hello-response', stream: false }
   })
   h.register({ name: 'ping', request: { name: '@greeter/ping', send: true } })
+  h.register({
+    name: 'watch',
+    request: { name: '@greeter/watch-request', stream: false },
+    response: { name: '@greeter/log-event', stream: true }
+  })
   return { schema, hrpc }
 }
 
@@ -313,4 +323,73 @@ main (void) {
   const res = runC(schema, hrpc, main)
   t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
   t.is(res.stdout.trim(), '777', 'JS-encoded response decoded by C')
+})
+
+test('interop: C response-stream frames -> JS decode', (t) => {
+  const { schema, hrpc } = buildGreeter()
+
+  const main = `${PREAMBLE}
+int
+main (void) {
+  uint8_t *b = NULL; size_t n = 0;
+
+  greeter_log_event_t chunk = { .seq = 77 };
+  assert(greeter_encode_watch_chunk(9, &chunk, &b, &n) == 0);
+  print_bytes(b, n); free(b); b = NULL;
+
+  assert(greeter_encode_watch_end(9, &b, &n) == 0);
+  print_bytes(b, n); free(b); b = NULL;
+
+  assert(greeter_encode_watch_open(9, &b, &n) == 0);
+  print_bytes(b, n); free(b); b = NULL;
+
+  return 0;
+}
+`
+  const res = runC(schema, hrpc, main)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+
+  const lines = res.stdout.trim().split('\n')
+  const chunk = decodeFrame(parseBytes(lines[0]))
+  t.is(chunk.type, 3, 'chunk is a stream frame')
+  t.is(chunk.stream, 0x210, 'chunk stream = RESPONSE|DATA')
+  t.is(c.decode(codecs.logEvent, chunk.data).seq, 77, 'chunk payload decoded in JS')
+
+  const end = decodeFrame(parseBytes(lines[1]))
+  t.is(end.type, 3, 'end is a stream frame')
+  t.is(end.id, 9, 'end frame id')
+  t.is(end.stream, 0x220, 'end stream = RESPONSE|END')
+  t.is(end.data, null, 'end frame has no payload')
+
+  const open = decodeFrame(parseBytes(lines[2]))
+  t.is(open.type, 2, 'open is a response frame')
+  t.is(open.id, 9, 'open frame id')
+  t.is(open.stream, 0x1, 'open stream = OPEN')
+})
+
+test('interop: JS response-stream chunk -> C decode', (t) => {
+  const { schema, hrpc } = buildGreeter()
+
+  const payload = Buffer.from(c.encode(codecs.logEvent, { seq: 88 }))
+  const header = c.encode(m.header, { type: 3, id: 9, stream: 0x210, error: null, data: payload })
+  const frame = Buffer.concat([header, payload])
+
+  const main = `${PREAMBLE}
+int
+main (void) {
+  uint8_t input[] = {${toCArray(frame)}};
+  compact_state_t in = {0, sizeof(input), input};
+  rpc_message_t msg; memset(&msg, 0, sizeof(msg));
+  assert(rpc_decode_message(&in, &msg) == 0);
+  assert(msg.type == rpc_stream);
+  assert(msg.stream == (rpc_stream_response | rpc_stream_data));
+  greeter_log_event_t out = {0};
+  assert(greeter_decode_watch_chunk(&msg, &out) == 0);
+  printf("%llu\\n", (unsigned long long) out.seq);
+  return 0;
+}
+`
+  const res = runC(schema, hrpc, main)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+  t.is(res.stdout.trim(), '88', 'JS-encoded chunk decoded by C')
 })
