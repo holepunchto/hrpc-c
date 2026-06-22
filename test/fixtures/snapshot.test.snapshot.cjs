@@ -58,7 +58,8 @@ enum {
   greeter_command_echo = 1,
   greeter_command_ping = 2,
   greeter_command_watch = 3,
-  admin_command_ban = 4,
+  greeter_command_collect = 4,
+  admin_command_ban = 5,
 };
 
 // @greeter/hello (unary)
@@ -127,6 +128,43 @@ greeter_decode_watch_chunk (const rpc_message_t *msg, greeter_log_event_t *out);
 // stream_id == the request id; pass it to the encoders above.
 typedef int (*greeter_on_watch) (void *ctx, const greeter_watch_request_t *req, uint64_t stream_id);
 
+// @greeter/collect (request-stream)
+// client: open the request stream (rpc_request, stream=open)
+int
+greeter_encode_collect_open (uint64_t id, uint8_t **out, size_t *out_len);
+
+// client: one data chunk (rpc_stream, stream=request|data)
+int
+greeter_encode_collect_chunk (uint64_t id, const greeter_collect_request_t *chunk, uint8_t **out, size_t *out_len);
+
+// client: end the request stream (rpc_stream, stream=request|end)
+int
+greeter_encode_collect_end (uint64_t id, uint8_t **out, size_t *out_len);
+
+// client: decode the single reply. hrpc_ok (fills *result), hrpc_error_response (fills *error), or < 0.
+int
+greeter_decode_collect_response (const rpc_message_t *msg, greeter_collect_response_t *result, hrpc_error_t *error);
+
+// server: echo the open back (rpc_stream, stream=request|open) so the client unblocks
+int
+greeter_encode_collect_stream_open (uint64_t id, uint8_t **out, size_t *out_len);
+
+// server: decode one chunk. Caller has confirmed msg->stream & rpc_stream_data.
+int
+greeter_decode_collect_chunk (const rpc_message_t *msg, greeter_collect_request_t *out);
+
+// server: the single reply (rpc_response, stream=0)
+int
+greeter_encode_collect_response (uint64_t id, const greeter_collect_response_t *res, uint8_t **out, size_t *out_len);
+
+// server: error reply (rpc_response, error=true)
+int
+greeter_encode_collect_error (uint64_t id, hrpc_error_t error, uint8_t **out, size_t *out_len);
+
+// Return 0 to accept the stream (dispatch yields hrpc_dispatch_stream); < 0 to reject.
+// stream_id == the request id; the request data arrives later as chunks.
+typedef int (*greeter_on_collect) (void *ctx, uint64_t stream_id);
+
 // @admin/ban (unary)
 int
 admin_encode_ban (uint64_t id, const admin_ban_request_t *args, uint8_t **out, size_t *out_len);
@@ -147,6 +185,7 @@ typedef struct {
   greeter_on_echo on_echo;
   greeter_on_ping on_ping;
   greeter_on_watch on_watch;
+  greeter_on_collect on_collect;
   admin_on_ban on_ban;
 } greeter_admin_hrpc_handlers_t;
 
@@ -425,6 +464,124 @@ greeter_decode_watch_chunk (const rpc_message_t *msg, greeter_log_event_t *out) 
 }
 
 int
+greeter_encode_collect_open (uint64_t id, uint8_t **out, size_t *out_len) {
+  rpc_message_t msg = {0};
+  msg.type = rpc_request;
+  msg.id = id;
+  msg.command = greeter_command_collect;
+  msg.stream = rpc_stream_open;
+  return greeter_admin_hrpc__frame(&msg, out, out_len);
+}
+
+int
+greeter_encode_collect_chunk (uint64_t id, const greeter_collect_request_t *chunk, uint8_t **out, size_t *out_len) {
+  compact_state_t payload = {0, 0, NULL};
+  int err = greeter_collect_request_preencode(&payload, chunk);
+  if (err < 0) return hrpc_err_decode;
+  if (payload.end > 0) {
+    payload.buffer = malloc(payload.end);
+    if (payload.buffer == NULL) return hrpc_err_alloc;
+    err = greeter_collect_request_encode(&payload, chunk);
+    if (err < 0) {
+      free(payload.buffer);
+      return hrpc_err_decode;
+    }
+  }
+
+  rpc_message_t msg = {0};
+  msg.type = rpc_stream;
+  msg.id = id;
+  msg.stream = rpc_stream_request | rpc_stream_data;
+  msg.data = payload.buffer;
+  msg.len = payload.end;
+
+  err = greeter_admin_hrpc__frame(&msg, out, out_len);
+  free(payload.buffer);
+  return err;
+}
+
+int
+greeter_encode_collect_end (uint64_t id, uint8_t **out, size_t *out_len) {
+  rpc_message_t msg = {0};
+  msg.type = rpc_stream;
+  msg.id = id;
+  msg.stream = rpc_stream_request | rpc_stream_end;
+  return greeter_admin_hrpc__frame(&msg, out, out_len);
+}
+
+int
+greeter_decode_collect_response (const rpc_message_t *msg, greeter_collect_response_t *result, hrpc_error_t *error) {
+  if (msg->error) {
+    error->message = msg->message;
+    error->code = msg->code;
+    error->status = msg->status;
+    return hrpc_error_response;
+  }
+  compact_state_t payload = {0, msg->len, msg->data};
+  int err = greeter_collect_response_decode(&payload, result);
+  if (err < 0) return hrpc_err_decode;
+  return hrpc_ok;
+}
+
+int
+greeter_encode_collect_stream_open (uint64_t id, uint8_t **out, size_t *out_len) {
+  rpc_message_t msg = {0};
+  msg.type = rpc_stream;
+  msg.id = id;
+  msg.stream = rpc_stream_request | rpc_stream_open;
+  return greeter_admin_hrpc__frame(&msg, out, out_len);
+}
+
+int
+greeter_decode_collect_chunk (const rpc_message_t *msg, greeter_collect_request_t *out) {
+  compact_state_t payload = {0, msg->len, msg->data};
+  int err = greeter_collect_request_decode(&payload, out);
+  if (err < 0) return hrpc_err_decode;
+  return 0;
+}
+
+int
+greeter_encode_collect_response (uint64_t id, const greeter_collect_response_t *res, uint8_t **out, size_t *out_len) {
+  compact_state_t payload = {0, 0, NULL};
+  int err = greeter_collect_response_preencode(&payload, res);
+  if (err < 0) return hrpc_err_decode;
+  if (payload.end > 0) {
+    payload.buffer = malloc(payload.end);
+    if (payload.buffer == NULL) return hrpc_err_alloc;
+    err = greeter_collect_response_encode(&payload, res);
+    if (err < 0) {
+      free(payload.buffer);
+      return hrpc_err_decode;
+    }
+  }
+
+  rpc_message_t msg = {0};
+  msg.type = rpc_response;
+  msg.id = id;
+  msg.error = false;
+  msg.stream = 0;
+  msg.data = payload.buffer;
+  msg.len = payload.end;
+
+  err = greeter_admin_hrpc__frame(&msg, out, out_len);
+  free(payload.buffer);
+  return err;
+}
+
+int
+greeter_encode_collect_error (uint64_t id, hrpc_error_t error, uint8_t **out, size_t *out_len) {
+  rpc_message_t msg = {0};
+  msg.type = rpc_response;
+  msg.id = id;
+  msg.error = true;
+  msg.stream = 0;
+  msg.message = error.message;
+  msg.code = error.code;
+  msg.status = error.status;
+  return greeter_admin_hrpc__frame(&msg, out, out_len);
+}
+
+int
 admin_encode_ban (uint64_t id, const admin_ban_request_t *args, uint8_t **out, size_t *out_len) {
   compact_state_t payload = {0, 0, NULL};
   int err = admin_ban_request_preencode(&payload, args);
@@ -608,6 +765,13 @@ greeter_admin_hrpc_dispatch (const greeter_admin_hrpc_handlers_t *handlers, cons
     if (greeter_watch_request_decode(&in, &req) < 0) return hrpc_err_decode;
     int r = handlers->on_watch(handlers->ctx, &req, msg->id);
     greeter_watch_request_destroy(&req);
+    if (r < 0) return r;
+    return hrpc_dispatch_stream;
+  }
+  case greeter_command_collect: {
+    if (handlers->on_collect == NULL) return hrpc_err_unknown;
+    if (!(msg->stream & rpc_stream_open)) return hrpc_err_decode;
+    int r = handlers->on_collect(handlers->ctx, msg->id);
     if (r < 0) return r;
     return hrpc_dispatch_stream;
   }

@@ -37,6 +37,14 @@ function buildHRPC() {
     name: 'log-event',
     fields: [{ name: 'seq', type: 'uint', required: true }]
   })
+  greeter.register({
+    name: 'collect-request',
+    fields: [{ name: 'value', type: 'uint', required: true }]
+  })
+  greeter.register({
+    name: 'collect-response',
+    fields: [{ name: 'total', type: 'uint', required: true }]
+  })
 
   const admin = schema.namespace('admin')
   admin.register({
@@ -70,6 +78,11 @@ function buildHRPC() {
     name: 'watch',
     request: { name: '@greeter/watch-request', stream: false },
     response: { name: '@greeter/log-event', stream: true }
+  })
+  hrpc.namespace('greeter').register({
+    name: 'collect',
+    request: { name: '@greeter/collect-request', stream: true },
+    response: { name: '@greeter/collect-response', stream: false }
   })
   hrpc.namespace('admin').register({
     name: 'ban',

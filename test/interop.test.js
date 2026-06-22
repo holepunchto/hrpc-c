@@ -26,13 +26,23 @@ function jsCodecs() {
   ns.register({ name: 'ping', fields: [{ name: 'seq', type: 'uint', required: true }] })
   ns.register({ name: 'watch-request', fields: [{ name: 'since', type: 'uint', required: true }] })
   ns.register({ name: 'log-event', fields: [{ name: 'seq', type: 'uint', required: true }] })
+  ns.register({
+    name: 'collect-request',
+    fields: [{ name: 'value', type: 'uint', required: true }]
+  })
+  ns.register({
+    name: 'collect-response',
+    fields: [{ name: 'total', type: 'uint', required: true }]
+  })
   Hyperschema.toDisk(schema)
   const mod = require(path.join(JS_SCHEMA_DIR, 'index.js'))
   return {
     helloRequest: mod.getEncoding('@greeter/hello-request'),
     helloResponse: mod.getEncoding('@greeter/hello-response'),
     ping: mod.getEncoding('@greeter/ping'),
-    logEvent: mod.getEncoding('@greeter/log-event')
+    logEvent: mod.getEncoding('@greeter/log-event'),
+    collectRequest: mod.getEncoding('@greeter/collect-request'),
+    collectResponse: mod.getEncoding('@greeter/collect-response')
   }
 }
 
@@ -50,6 +60,14 @@ function buildGreeter() {
   ns.register({ name: 'ping', fields: [{ name: 'seq', type: 'uint', required: true }] })
   ns.register({ name: 'watch-request', fields: [{ name: 'since', type: 'uint', required: true }] })
   ns.register({ name: 'log-event', fields: [{ name: 'seq', type: 'uint', required: true }] })
+  ns.register({
+    name: 'collect-request',
+    fields: [{ name: 'value', type: 'uint', required: true }]
+  })
+  ns.register({
+    name: 'collect-response',
+    fields: [{ name: 'total', type: 'uint', required: true }]
+  })
   const hrpc = new CHRPC(schema, null, {})
   const h = hrpc.namespace('greeter')
   h.register({
@@ -62,6 +80,11 @@ function buildGreeter() {
     name: 'watch',
     request: { name: '@greeter/watch-request', stream: false },
     response: { name: '@greeter/log-event', stream: true }
+  })
+  h.register({
+    name: 'collect',
+    request: { name: '@greeter/collect-request', stream: true },
+    response: { name: '@greeter/collect-response', stream: false }
   })
   return { schema, hrpc }
 }
@@ -392,4 +415,97 @@ main (void) {
   const res = runC(schema, hrpc, main)
   t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
   t.is(res.stdout.trim(), '88', 'JS-encoded chunk decoded by C')
+})
+
+test('interop: C request-stream frames -> JS decode', (t) => {
+  const { schema, hrpc } = buildGreeter()
+
+  const main = `${PREAMBLE}
+int
+main (void) {
+  uint8_t *b = NULL; size_t n = 0;
+
+  greeter_collect_request_t chunk = { .value = 12 };
+  assert(greeter_encode_collect_chunk(9, &chunk, &b, &n) == 0);
+  print_bytes(b, n); free(b); b = NULL;
+
+  assert(greeter_encode_collect_end(9, &b, &n) == 0);
+  print_bytes(b, n); free(b); b = NULL;
+
+  greeter_collect_response_t res = { .total = 30 };
+  assert(greeter_encode_collect_response(9, &res, &b, &n) == 0);
+  print_bytes(b, n); free(b); b = NULL;
+
+  return 0;
+}
+`
+  const res = runC(schema, hrpc, main)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+
+  const lines = res.stdout.trim().split('\n')
+
+  const chunk = decodeFrame(parseBytes(lines[0]))
+  t.is(chunk.type, 3, 'chunk is a stream frame')
+  t.is(chunk.id, 9, 'chunk id')
+  t.is(chunk.stream, 0x110, 'chunk stream = REQUEST|DATA')
+  t.is(c.decode(codecs.collectRequest, chunk.data).value, 12, 'chunk payload decoded in JS')
+
+  const end = decodeFrame(parseBytes(lines[1]))
+  t.is(end.type, 3, 'end is a stream frame')
+  t.is(end.id, 9, 'end frame id')
+  t.is(end.stream, 0x120, 'end stream = REQUEST|END')
+  t.is(end.data, null, 'end frame has no payload')
+
+  const reply = decodeFrame(parseBytes(lines[2]))
+  t.is(reply.type, 2, 'reply is a response frame')
+  t.is(reply.id, 9, 'reply id')
+  t.is(reply.stream, 0, 'reply stream = 0')
+  t.is(c.decode(codecs.collectResponse, reply.data).total, 30, 'reply payload decoded in JS')
+})
+
+test('interop: JS request-stream frames -> C decode', (t) => {
+  const { schema, hrpc } = buildGreeter()
+
+  // OPEN: type 1 request, command = greeter_command_collect (3), stream = OPEN
+  const openFrame = Buffer.from(
+    c.encode(m.header, { type: 1, id: 9, command: 3, stream: 0x1, data: null })
+  )
+
+  const chunkPayload = Buffer.from(c.encode(codecs.collectRequest, { value: 21 }))
+  const chunkHeader = c.encode(m.header, {
+    type: 3,
+    id: 9,
+    stream: 0x110,
+    error: null,
+    data: chunkPayload
+  })
+  const chunkFrame = Buffer.concat([chunkHeader, chunkPayload])
+
+  const main = `${PREAMBLE}
+int
+main (void) {
+  uint8_t open_in[] = {${toCArray(openFrame)}};
+  compact_state_t oin = {0, sizeof(open_in), open_in};
+  rpc_message_t om; memset(&om, 0, sizeof(om));
+  assert(rpc_decode_message(&oin, &om) == 0);
+  assert(om.type == rpc_request);
+  assert(om.id == 9);
+  assert(om.command == greeter_command_collect);
+  assert(om.stream == rpc_stream_open);
+
+  uint8_t chunk_in[] = {${toCArray(chunkFrame)}};
+  compact_state_t cin = {0, sizeof(chunk_in), chunk_in};
+  rpc_message_t cm; memset(&cm, 0, sizeof(cm));
+  assert(rpc_decode_message(&cin, &cm) == 0);
+  assert(cm.type == rpc_stream);
+  assert(cm.stream == (rpc_stream_request | rpc_stream_data));
+  greeter_collect_request_t out = {0};
+  assert(greeter_decode_collect_chunk(&cm, &out) == 0);
+  printf("%llu\\n", (unsigned long long) out.value);
+  return 0;
+}
+`
+  const res = runC(schema, hrpc, main)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+  t.is(res.stdout.trim(), '21', 'JS-encoded chunk decoded by C')
 })

@@ -31,20 +31,6 @@ test('duplicate command short-name throws', (t) => {
   t.exception(() => generateC(hrpc, { schemaTarget: 'greeter_schema' }), /DUPLICATE_COMMAND_NAME/)
 })
 
-test('request-stream handler is rejected in this version', (t) => {
-  const schema = new Hyperschema()
-  const ns = schema.namespace('greeter')
-  ns.register({ name: 'tick', fields: [{ name: 'n', type: 'uint', required: true }] })
-
-  const hrpc = new HRPC(schema, null, {})
-  hrpc.namespace('greeter').register({
-    name: 'feed',
-    request: { name: '@greeter/tick', stream: true },
-    response: { name: '@greeter/tick', stream: false }
-  })
-  t.exception(() => generateC(hrpc, { schemaTarget: 'greeter_schema' }), /UNSUPPORTED_HANDLER/)
-})
-
 test('duplex handler is rejected in this version', (t) => {
   const schema = new Hyperschema()
   const ns = schema.namespace('greeter')
@@ -117,6 +103,76 @@ test('response-stream: classify and generated declarations', (t) => {
     'error uses RESPONSE|CLOSE|ERROR'
   )
   t.ok(source.includes('return hrpc_dispatch_stream;'), 'dispatch returns stream code')
+})
+
+test('request-stream: classify and generated declarations', (t) => {
+  const schema = new Hyperschema()
+  const ns = schema.namespace('greeter')
+  ns.register({
+    name: 'collect-request',
+    fields: [{ name: 'value', type: 'uint', required: true }]
+  })
+  ns.register({
+    name: 'collect-response',
+    fields: [{ name: 'total', type: 'uint', required: true }]
+  })
+
+  const hrpc = new HRPC(schema, null, {})
+  hrpc.namespace('greeter').register({
+    name: 'collect',
+    request: { name: '@greeter/collect-request', stream: true },
+    response: { name: '@greeter/collect-response', stream: false }
+  })
+
+  const { header, source } = generateC(hrpc, { schemaTarget: 'greeter_schema' })
+
+  t.ok(header.includes('greeter_encode_collect_open (uint64_t id'), 'client open declared')
+  t.ok(
+    header.includes(
+      'greeter_encode_collect_chunk (uint64_t id, const greeter_collect_request_t *chunk'
+    ),
+    'client chunk declared'
+  )
+  t.ok(header.includes('greeter_encode_collect_end (uint64_t id'), 'client end declared')
+  t.ok(
+    header.includes('greeter_encode_collect_stream_open (uint64_t id'),
+    'server open-echo declared'
+  )
+  t.ok(
+    header.includes(
+      'greeter_encode_collect_response (uint64_t id, const greeter_collect_response_t *res'
+    ),
+    'server response declared'
+  )
+  t.ok(
+    header.includes('greeter_encode_collect_error (uint64_t id, hrpc_error_t error'),
+    'server error declared'
+  )
+  t.ok(
+    header.includes(
+      'greeter_decode_collect_chunk (const rpc_message_t *msg, greeter_collect_request_t *out'
+    ),
+    'server chunk decoder declared'
+  )
+  t.ok(
+    header.includes(
+      'greeter_decode_collect_response (const rpc_message_t *msg, greeter_collect_response_t *result'
+    ),
+    'client response decoder declared'
+  )
+  t.ok(header.includes('(*greeter_on_collect) (void *ctx, uint64_t stream_id)'), 'handler typedef')
+  t.absent(header.includes('greeter_on_collect) (void *ctx, const'), 'no req arg in handler')
+  t.ok(source.includes('rpc_stream_request | rpc_stream_data'), 'chunk uses REQUEST|DATA')
+  t.ok(source.includes('rpc_stream_request | rpc_stream_open'), 'echo uses REQUEST|OPEN')
+  t.ok(source.includes('rpc_stream_request | rpc_stream_end'), 'end uses REQUEST|END')
+  t.ok(
+    source.includes('if (!(msg->stream & rpc_stream_open)) return hrpc_err_decode;'),
+    'dispatch checks open flag'
+  )
+  t.ok(
+    source.includes('handlers->on_collect(handlers->ctx, msg->id)'),
+    'dispatch calls handler with stream id only'
+  )
 })
 
 test('event handler does not throw', (t) => {
