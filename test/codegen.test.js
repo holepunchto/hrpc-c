@@ -31,20 +31,6 @@ test('duplicate command short-name throws', (t) => {
   t.exception(() => generateC(hrpc, { schemaTarget: 'greeter_schema' }), /DUPLICATE_COMMAND_NAME/)
 })
 
-test('duplex handler is rejected in this version', (t) => {
-  const schema = new Hyperschema()
-  const ns = schema.namespace('greeter')
-  ns.register({ name: 'tick', fields: [{ name: 'n', type: 'uint', required: true }] })
-
-  const hrpc = new HRPC(schema, null, {})
-  hrpc.namespace('greeter').register({
-    name: 'pipe',
-    request: { name: '@greeter/tick', stream: true },
-    response: { name: '@greeter/tick', stream: true }
-  })
-  t.exception(() => generateC(hrpc, { schemaTarget: 'greeter_schema' }), /UNSUPPORTED_HANDLER/)
-})
-
 test('response-stream: classify and generated declarations', (t) => {
   const schema = new Hyperschema()
   const ns = schema.namespace('greeter')
@@ -171,6 +157,53 @@ test('request-stream: classify and generated declarations', (t) => {
   )
   t.ok(
     source.includes('handlers->on_collect(handlers->ctx, msg->id)'),
+    'dispatch calls handler with stream id only'
+  )
+})
+
+test('duplex: classify and generated declarations', (t) => {
+  const schema = new Hyperschema()
+  const ns = schema.namespace('greeter')
+  ns.register({ name: 'pipe-request', fields: [{ name: 'value', type: 'uint', required: true }] })
+  ns.register({ name: 'pipe-response', fields: [{ name: 'token', type: 'uint', required: true }] })
+
+  const hrpc = new HRPC(schema, null, {})
+  hrpc.namespace('greeter').register({
+    name: 'pipe',
+    request: { name: '@greeter/pipe-request', stream: true },
+    response: { name: '@greeter/pipe-response', stream: true }
+  })
+
+  const { header, source } = generateC(hrpc, { schemaTarget: 'greeter_schema' })
+
+  for (const decl of [
+    'greeter_encode_pipe_request_open (uint64_t id',
+    'greeter_encode_pipe_request_chunk (uint64_t id, const greeter_pipe_request_t *chunk',
+    'greeter_encode_pipe_request_end (uint64_t id',
+    'greeter_encode_pipe_response_stream_open (uint64_t id',
+    'greeter_decode_pipe_response_chunk (const rpc_message_t *msg, greeter_pipe_response_t *out',
+    'greeter_encode_pipe_request_stream_open (uint64_t id',
+    'greeter_decode_pipe_request_chunk (const rpc_message_t *msg, greeter_pipe_request_t *out',
+    'greeter_encode_pipe_response_open (uint64_t id',
+    'greeter_encode_pipe_response_chunk (uint64_t id, const greeter_pipe_response_t *chunk',
+    'greeter_encode_pipe_response_end (uint64_t id',
+    'greeter_encode_pipe_response_error (uint64_t id, hrpc_error_t error'
+  ]) {
+    t.ok(header.includes(decl), decl)
+  }
+  t.ok(header.includes('(*greeter_on_pipe) (void *ctx, uint64_t stream_id)'), 'handler typedef')
+  t.ok(source.includes('msg.type = rpc_request'), 'request open is a request frame')
+  t.ok(source.includes('msg.type = rpc_response'), 'response open is a response frame')
+  t.ok(source.includes('rpc_stream_request | rpc_stream_data'), 'request chunk REQUEST|DATA')
+  t.ok(source.includes('rpc_stream_response | rpc_stream_data'), 'response chunk RESPONSE|DATA')
+  t.ok(source.includes('rpc_stream_request | rpc_stream_open'), 'request echo REQUEST|OPEN')
+  t.ok(source.includes('rpc_stream_response | rpc_stream_open'), 'response echo RESPONSE|OPEN')
+  t.ok(
+    source.includes('rpc_stream_response | rpc_stream_close | rpc_stream_error'),
+    'response error RESPONSE|CLOSE|ERROR'
+  )
+  t.ok(
+    source.includes('handlers->on_pipe(handlers->ctx, msg->id)'),
     'dispatch calls handler with stream id only'
   )
 })
