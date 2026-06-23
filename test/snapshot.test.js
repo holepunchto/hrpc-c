@@ -45,6 +45,14 @@ function buildHRPC() {
     name: 'collect-response',
     fields: [{ name: 'total', type: 'uint', required: true }]
   })
+  greeter.register({
+    name: 'pipe-request',
+    fields: [{ name: 'value', type: 'uint', required: true }]
+  })
+  greeter.register({
+    name: 'pipe-response',
+    fields: [{ name: 'token', type: 'uint', required: true }]
+  })
 
   const admin = schema.namespace('admin')
   admin.register({
@@ -83,6 +91,11 @@ function buildHRPC() {
     name: 'collect',
     request: { name: '@greeter/collect-request', stream: true },
     response: { name: '@greeter/collect-response', stream: false }
+  })
+  hrpc.namespace('greeter').register({
+    name: 'pipe',
+    request: { name: '@greeter/pipe-request', stream: true },
+    response: { name: '@greeter/pipe-response', stream: true }
   })
   hrpc.namespace('admin').register({
     name: 'ban',

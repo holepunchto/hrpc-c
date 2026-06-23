@@ -245,3 +245,140 @@ test('request-stream compiles and round-trips through generated C', { timeout: 2
   const res = runC(schema, hrpc, COLLECT_MAIN_C)
   t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
 })
+
+function buildPipe() {
+  const schema = CHyperschema.from(null)
+  const ns = schema.namespace('greeter')
+  ns.register({ name: 'pipe-request', fields: [{ name: 'value', type: 'uint', required: true }] })
+  ns.register({ name: 'pipe-response', fields: [{ name: 'token', type: 'uint', required: true }] })
+  const hrpc = new CHRPC(schema, null, {})
+  hrpc.namespace('greeter').register({
+    name: 'pipe',
+    request: { name: '@greeter/pipe-request', stream: true },
+    response: { name: '@greeter/pipe-response', stream: true }
+  })
+  return { schema, hrpc }
+}
+
+const PIPE_MAIN_C = `
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include "greeter_hrpc.h"
+
+static uint64_t g_stream_id = 0;
+
+static int
+on_pipe (void *ctx, uint64_t stream_id) {
+  (void) ctx;
+  g_stream_id = stream_id;
+  return 0;
+}
+
+static void
+roundtrip (uint8_t *buf, size_t len, rpc_message_t *out) {
+  compact_state_t in = {0, len, buf};
+  memset(out, 0, sizeof(*out));
+  assert(rpc_decode_message(&in, out) == 0);
+}
+
+int
+main (void) {
+  uint8_t *buf = NULL;
+  size_t len = 0;
+  rpc_message_t m;
+
+  // dispatch: a pipe request-open routes to on_pipe(ctx, stream_id), no payload decode
+  assert(greeter_encode_pipe_request_open(9, &buf, &len) == 0);
+  compact_state_t rin = {0, len, buf};
+  rpc_message_t reqmsg; memset(&reqmsg, 0, sizeof(reqmsg));
+  assert(rpc_decode_message(&rin, &reqmsg) == 0);
+  assert(reqmsg.type == rpc_request);
+  assert(reqmsg.id == 9);
+  assert(reqmsg.command == greeter_command_pipe);
+  assert(reqmsg.stream == rpc_stream_open);
+
+  greeter_hrpc_handlers_t handlers = { .ctx = NULL, .on_pipe = on_pipe };
+  uint8_t *reply = NULL; size_t reply_len = 0;
+  assert(greeter_hrpc_dispatch(&handlers, &reqmsg, &reply, &reply_len) == hrpc_dispatch_stream);
+  assert(g_stream_id == 9);
+  assert(reply == NULL);
+  assert(reply_len == 0);
+  free(buf); buf = NULL;
+
+  // request open echo (server): rpc_stream, request|open
+  assert(greeter_encode_pipe_request_stream_open(9, &buf, &len) == 0);
+  roundtrip(buf, len, &m); free(buf); buf = NULL;
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_request | rpc_stream_open));
+
+  // request chunk (client): rpc_stream, request|data, payload decodes (server side)
+  greeter_pipe_request_t rc = { .value = 12 };
+  assert(greeter_encode_pipe_request_chunk(9, &rc, &buf, &len) == 0);
+  roundtrip(buf, len, &m);
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_request | rpc_stream_data));
+  greeter_pipe_request_t rgot = {0};
+  assert(greeter_decode_pipe_request_chunk(&m, &rgot) == 0);
+  assert(rgot.value == 12);
+  free(buf); buf = NULL;
+
+  // request end (client): rpc_stream, request|end
+  assert(greeter_encode_pipe_request_end(9, &buf, &len) == 0);
+  roundtrip(buf, len, &m); free(buf); buf = NULL;
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_request | rpc_stream_end));
+
+  // response open (server): rpc_response, stream=open
+  assert(greeter_encode_pipe_response_open(9, &buf, &len) == 0);
+  roundtrip(buf, len, &m); free(buf); buf = NULL;
+  assert(m.type == rpc_response);
+  assert(m.id == 9);
+  assert(m.stream == rpc_stream_open);
+
+  // response open echo (client): rpc_stream, response|open
+  assert(greeter_encode_pipe_response_stream_open(9, &buf, &len) == 0);
+  roundtrip(buf, len, &m); free(buf); buf = NULL;
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_response | rpc_stream_open));
+
+  // response chunk (server): rpc_stream, response|data, payload decodes (client side)
+  greeter_pipe_response_t sc = { .token = 77 };
+  assert(greeter_encode_pipe_response_chunk(9, &sc, &buf, &len) == 0);
+  roundtrip(buf, len, &m);
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_response | rpc_stream_data));
+  greeter_pipe_response_t sgot = {0};
+  assert(greeter_decode_pipe_response_chunk(&m, &sgot) == 0);
+  assert(sgot.token == 77);
+  free(buf); buf = NULL;
+
+  // response end (server): rpc_stream, response|end
+  assert(greeter_encode_pipe_response_end(9, &buf, &len) == 0);
+  roundtrip(buf, len, &m); free(buf); buf = NULL;
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_response | rpc_stream_end));
+
+  // response error (server): rpc_stream, response|close|error, fields survive
+  hrpc_error_t error = {0};
+  error.message = (utf8_string_view_t){ (const utf8_t *) "boom", 4 };
+  error.code = (utf8_string_view_t){ (const utf8_t *) "ERR", 3 };
+  error.status = 500;
+  assert(greeter_encode_pipe_response_error(9, error, &buf, &len) == 0);
+  roundtrip(buf, len, &m);
+  assert(m.type == rpc_stream);
+  assert(m.stream == (rpc_stream_response | rpc_stream_close | rpc_stream_error));
+  assert(m.status == 500);
+  assert(m.message.len == 4 && memcmp(m.message.data, "boom", 4) == 0);
+  assert(m.code.len == 3 && memcmp(m.code.data, "ERR", 3) == 0);
+  free(buf); buf = NULL;
+
+  return 0;
+}
+`
+
+test('duplex compiles and round-trips through generated C', { timeout: 200000 }, (t) => {
+  const { schema, hrpc } = buildPipe()
+  const res = runC(schema, hrpc, PIPE_MAIN_C)
+  t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+})
