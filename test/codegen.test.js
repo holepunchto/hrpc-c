@@ -6,6 +6,31 @@ const generateC = require('../lib/codegen')
 // Generated output is verified by the snapshot test (test/snapshot.test.js).
 // These cover the error paths a snapshot can't show.
 
+test('keyword command names generate valid prefixed C (no reserved-word collision)', (t) => {
+  // A command literally named `int` (a C keyword) is a valid kebab name. Every
+  // generated identifier is namespace/role-prefixed, so no bare keyword is ever
+  // emitted - the name generates clean C rather than being rejected.
+  const schema = new Hyperschema()
+  const ns = schema.namespace('greeter')
+  ns.register({ name: 'int-request', fields: [{ name: 'id', type: 'uint', required: true }] })
+  ns.register({ name: 'int-response', fields: [{ name: 'ok', type: 'bool', required: true }] })
+
+  const hrpc = new HRPC(schema, null, {})
+  hrpc.namespace('greeter').register({
+    name: 'int',
+    request: { name: '@greeter/int-request', stream: false },
+    response: { name: '@greeter/int-response', stream: false }
+  })
+
+  const { header, source } = generateC(hrpc, { schemaTarget: 'greeter_schema' })
+
+  t.ok(header.includes('greeter_command_int = 0'), 'command const is prefixed')
+  t.ok(header.includes('greeter_encode_int (uint64_t id'), 'encode fn is prefixed')
+  t.ok(header.includes('(*greeter_on_int) (void *ctx'), 'handler typedef is prefixed')
+  t.ok(header.includes('greeter_on_int on_int;'), 'handler struct field is prefixed')
+  t.ok(source.includes('case greeter_command_int:'), 'dispatch case is prefixed')
+})
+
 test('duplicate command short-name throws', (t) => {
   const schema = new Hyperschema()
   const ns = schema.namespace('greeter')
