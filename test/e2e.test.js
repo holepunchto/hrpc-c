@@ -61,7 +61,7 @@ int
 main (void) {
   reply_ctx_t reply = {0};
   rpc_client_t client;
-  assert(rpc_client_init(&client, NULL, NULL) == 0); // no fallthrough needed for unary
+  assert(rpc_client_init(&client, NULL, NULL) == 0); // no fallthrough; only the tracked reply is read
 
   uint64_t id = rpc_client_next_id(&client);
   assert(id == 1);
@@ -100,3 +100,113 @@ test('e2e: unary round-trip through rpc_client_t + dispatch', { timeout: 200000 
   const res = runC(schema, hrpc, UNARY_MAIN_C)
   t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
 })
+
+const STREAM_MAIN_C = `
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include "greeter_hrpc.h"
+#include <rpc/client.h>
+
+// server-out accumulator: on_watch appends its frames here via the handler ctx
+typedef struct { uint8_t *buf; size_t len; } outbuf_t;
+
+static void
+outbuf_append (outbuf_t *o, const uint8_t *frame, size_t n) {
+  uint8_t *next = realloc(o->buf, o->len + n);
+  assert(next != NULL);
+  o->buf = next;
+  memcpy(o->buf + o->len, frame, n);
+  o->len += n;
+}
+
+// server: emit open + 3 chunks + end for the watch stream
+static int
+on_watch (void *ctx, const greeter_watch_request_t *req, uint64_t stream_id) {
+  (void) req;
+  outbuf_t *o = ctx;
+  uint8_t *f = NULL; size_t n = 0;
+
+  assert(greeter_encode_watch_open(stream_id, &f, &n) == 0);
+  outbuf_append(o, f, n); free(f); f = NULL;
+
+  for (uint64_t seq = 0; seq < 3; seq++) {
+    greeter_log_event_t chunk = { .seq = seq };
+    assert(greeter_encode_watch_chunk(stream_id, &chunk, &f, &n) == 0);
+    outbuf_append(o, f, n); free(f); f = NULL;
+  }
+
+  assert(greeter_encode_watch_end(stream_id, &f, &n) == 0);
+  outbuf_append(o, f, n); free(f); f = NULL;
+
+  return 0;
+}
+
+// client fallthrough: branch on stream flags, NOT on msg->type (the open is a
+// rpc_response frame with stream=open; chunks/end are rpc_stream frames).
+// decode the chunk inside the callback - its view is valid only here. This test
+// has one stream, so any DATA frame is a watch chunk (a real consumer keys id).
+typedef struct { int open_seen; int end_seen; int chunk_count; uint64_t seqs[8]; } stream_ctx_t;
+
+static void
+on_stream (void *data, const rpc_message_t *msg) {
+  stream_ctx_t *s = data;
+  if (msg->stream & rpc_stream_data) {
+    greeter_log_event_t ev = {0};
+    assert(greeter_decode_watch_chunk(msg, &ev) == 0);
+    assert(s->chunk_count < 8);
+    s->seqs[s->chunk_count++] = ev.seq;
+  } else if (msg->stream & rpc_stream_end) {
+    s->end_seen = 1;
+  } else {
+    s->open_seen = 1; // the response-stream open
+  }
+}
+
+int
+main (void) {
+  stream_ctx_t sc = {0};
+  rpc_client_t client;
+  assert(rpc_client_init(&client, on_stream, &sc) == 0);
+
+  uint64_t id = rpc_client_next_id(&client);
+
+  greeter_watch_request_t args = { .since = 5 };
+  uint8_t *reqbuf = NULL; size_t reqlen = 0;
+  assert(greeter_encode_watch(id, &args, &reqbuf, &reqlen) == 0);
+
+  // server decodes + dispatches; on_watch batches all frames (free reqbuf after)
+  compact_state_t in = {0, reqlen, reqbuf};
+  rpc_message_t reqmsg; memset(&reqmsg, 0, sizeof(reqmsg));
+  assert(rpc_decode_message(&in, &reqmsg) == 0);
+
+  outbuf_t out = {0}; // ctx for on_watch to append its frames into
+  greeter_hrpc_handlers_t handlers = { .ctx = &out, .on_hello = NULL, .on_watch = on_watch };
+  uint8_t *replybuf = NULL; size_t replylen = 0;
+  assert(greeter_hrpc_dispatch(&handlers, &reqmsg, &replybuf, &replylen) == hrpc_dispatch_stream);
+  free(reqbuf);
+  assert(replybuf == NULL); // a stream dispatch writes no reply buffer
+
+  // client feeds ALL server frames in one read (callbacks never call read)
+  assert(rpc_client_read(&client, out.buf, out.len) == 0);
+  free(out.buf);
+
+  assert(sc.open_seen == 1);
+  assert(sc.end_seen == 1);
+  assert(sc.chunk_count == 3);
+  assert(sc.seqs[0] == 0 && sc.seqs[1] == 1 && sc.seqs[2] == 2);
+
+  rpc_client_destroy(&client);
+  return 0;
+}
+`
+
+test(
+  'e2e: response-stream through rpc_client_t fallthrough + dispatch',
+  { timeout: 200000 },
+  (t) => {
+    const { schema, hrpc } = buildE2E()
+    const res = runC(schema, hrpc, STREAM_MAIN_C)
+    t.ok(res.ok, res.ok ? 'compiled and ran' : res.stderr)
+  }
+)
