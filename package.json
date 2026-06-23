@@ -1,6 +1,6 @@
 {
   "name": "hrpc-c",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "C code generation for HRPC",
   "main": "index.js",
   "exports": {
