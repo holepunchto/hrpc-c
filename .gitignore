@@ -6,3 +6,6 @@ docs/superpowers/
 # c-workspace is a build sandbox; only its package.json is tracked
 test/c-workspace/*
 !test/c-workspace/package.json
+
+# c-workspace-raw is a build sandbox for schema-free C drivers (no package.json needed)
+test/c-workspace-raw/
