@@ -1,18 +1,12 @@
-// Cross-language conformance: decode hrpc-test's schema-free wire vectors in
-// C via librpc, and assert the decoded rpc_message_t matches the fixture
-// descriptor exactly. This proves a second, non-JS implementation reads what
-// the JS-generated fixtures say the bytes mean, rather than JS echoing itself.
+// Cross-language conformance: decode hrpc-test's wire vectors in C (via librpc)
+// and assert they match the fixtures - a non-JS check on the canonical bytes.
 const test = require('brittle')
 const path = require('path')
 const CHyperschema = require('hyperschema-c')
 const CHRPC = require('..')
 const { runCRaw, runC, toCArray } = require('./helpers/c')
 
-// hrpc-test is a Node-only tooling/fixtures package (plain require('fs'), no
-// Bare imports map), so it cannot load under brittle-bare. Skip the whole
-// file there rather than only the individual tests, since the require()
-// itself throws. Guard the process.platform read too: process is a Node
-// global hrpc-c doesn't polyfill for Bare.
+// hrpc-test is Node-only (no Bare imports map): require() throws under bare, so skip the file.
 const isBare = typeof Bare !== 'undefined'
 const isWindows = !isBare && process.platform === 'win32'
 
@@ -23,13 +17,8 @@ const PREAMBLE = `
 #include <rpc.h>
 `
 
-// Emit C asserting msg.data/msg.len match a descriptor's data field. The
-// wire (and libcompact's compact_decode_uint8array) has no way to represent
-// "no buffer" separately from "zero-length buffer": both null and "" encode
-// as dataLen 0 and decode with msg.data pointing into the input and
-// msg.len == 0. The JS null/empty-Buffer distinction is a JS-side API
-// artifact with no wire representation, so both fixture shapes assert the
-// same thing in C: msg.len == 0.
+// null and a zero-length buffer are indistinguishable on the wire (both encode
+// dataLen 0), so both fixture shapes assert only msg.len == 0.
 function assertData(data) {
   if (data === null || data.length === 0) {
     return 'assert(msg.len == 0);'
@@ -43,8 +32,7 @@ function assertData(data) {
   ].join('\n  ')
 }
 
-// Emit C asserting msg.message/msg.code/msg.status match a descriptor's
-// error field: { message, code, errno }.
+// Emit C asserting msg.{message,code,status} match the descriptor's error.
 function assertError(error) {
   const message = Buffer.from(error.message, 'utf8')
   const code = Buffer.from(error.code, 'utf8')
@@ -63,13 +51,7 @@ function assertError(error) {
     .join('\n  ')
 }
 
-// Build a C driver that decodes one frame and asserts every field the
-// descriptor pins down, per the union rules in hrpc-test/WIRE.md:
-//   request         (type 1): command always set; data iff stream == 0
-//   response        (type 2): error union - either the error struct, or
-//                              (data iff stream == 0)
-//   stream          (type 3): error union - either the error struct, or
-//                              (data iff stream has the DATA bit set)
+// Decode one frame in C and assert every field the descriptor pins (union rules per WIRE.md).
 function decodeDriver(hex, descriptor) {
   const frame = Buffer.from(hex, 'hex')
   const lines = [
@@ -129,10 +111,7 @@ if (!isBare) {
     }
   }
 
-  // --- dispatch: real generated struct codecs, not just the schema-free
-  // envelope. hrpc-test's fixtures/dispatch/{schema,hrpc} are already the
-  // frozen hyperschema/hrpc JSON this generator's own codegen consumes, so
-  // load them directly (no hand-copied schema definition to drift).
+  // Load hrpc-test's frozen fixtures/dispatch/{schema,hrpc} directly - no hand-copied schema to drift.
   const HRPC_TEST_DIR = path.dirname(require.resolve('hrpc-test'))
   const DISPATCH_SCHEMA_DIR = path.join(HRPC_TEST_DIR, 'fixtures', 'dispatch', 'schema')
   const DISPATCH_HRPC_DIR = path.join(HRPC_TEST_DIR, 'fixtures', 'dispatch', 'hrpc')
@@ -151,7 +130,7 @@ if (!isBare) {
 #include "greeter_hrpc.h"
 
 static void print_bytes (const uint8_t *buf, size_t len) {
-  for (size_t i = 0; i < len; i++) printf("%s%02x", i ? "" : "", buf[i]);
+  for (size_t i = 0; i < len; i++) printf("%02x", buf[i]);
   printf("\\n");
 }
 
@@ -252,13 +231,8 @@ main (void) {
     if (result.ok) t.is(result.stdout.trim(), 'ok', 'driver printed success marker')
   })
 
-  // --- Encode-match spot-check: a representative subset (one unary request,
-  // one success response, one error response, one stream data frame) where C
-  // ENCODES the message and the produced bytes must equal the fixture hex
-  // exactly. This is the strongest direction - C writes the same canonical
-  // bytes JS wrote - so it is kept to a subset by design rather than run over
-  // all ~50 vectors; every vector checked here is logged so the remaining
-  // decode-only coverage is an explicit, visible gap rather than a silent one.
+  // Encode-match spot-check: C encodes a representative subset; bytes must equal
+  // the fixture hex exactly. Kept to a logged subset so decode-only coverage is visible.
   const ENCODE_CHECKED = [
     'dispatch[0] hello request (unary request)',
     'dispatch[1] hello response (success response)',
@@ -314,7 +288,7 @@ main (void) {
 
   greeter_hrpc_handlers_t handlers = { .ctx = NULL, .on_hello = on_hello, .on_ping = on_ping };
   uint8_t *reply = NULL; size_t reply_len = 0;
-  // reqmsg holds non-owning views into reqbuf; keep reqbuf alive until dispatch has consumed it
+  // reqmsg views into reqbuf; free only after dispatch consumes it
   assert(greeter_hrpc_dispatch(&handlers, &reqmsg, &reply, &reply_len) == hrpc_dispatch_reply);
   free(reqbuf);
 
@@ -332,10 +306,7 @@ main (void) {
     const { messages, frames } = loadFamily('error')
     const { descriptor } = messages[0]
 
-    // librpc's status field is the wire-identical, differently-named
-    // counterpart to the canonical/JS "errno": same signed-int wire
-    // position, so setting status = descriptor.errno reproduces the exact
-    // canonical bytes despite the field-name mismatch.
+    // librpc's status is the wire-identical, differently-named counterpart to errno.
     const main = `
 #include <assert.h>
 #include <stdio.h>
@@ -343,7 +314,7 @@ main (void) {
 #include <rpc.h>
 
 static void print_bytes (const uint8_t *buf, size_t len) {
-  for (size_t i = 0; i < len; i++) printf("%s%02x", i ? "" : "", buf[i]);
+  for (size_t i = 0; i < len; i++) printf("%02x", buf[i]);
   printf("\\n");
 }
 
@@ -388,7 +359,7 @@ main (void) {
 #include <rpc.h>
 
 static void print_bytes (const uint8_t *buf, size_t len) {
-  for (size_t i = 0; i < len; i++) printf("%s%02x", i ? "" : "", buf[i]);
+  for (size_t i = 0; i < len; i++) printf("%02x", buf[i]);
   printf("\\n");
 }
 
