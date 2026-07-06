@@ -311,11 +311,12 @@ main (void) {
   compact_state_t in = {0, reqlen, reqbuf};
   rpc_message_t reqmsg; memset(&reqmsg, 0, sizeof(reqmsg));
   assert(rpc_decode_message(&in, &reqmsg) == 0);
-  free(reqbuf);
 
   greeter_hrpc_handlers_t handlers = { .ctx = NULL, .on_hello = on_hello, .on_ping = on_ping };
   uint8_t *reply = NULL; size_t reply_len = 0;
+  // reqmsg holds non-owning views into reqbuf; keep reqbuf alive until dispatch has consumed it
   assert(greeter_hrpc_dispatch(&handlers, &reqmsg, &reply, &reply_len) == hrpc_dispatch_reply);
+  free(reqbuf);
 
   print_bytes(reply, reply_len);
   free(reply);
