@@ -9,6 +9,7 @@ const { targetName, schemaTargetName } = require('../../lib/naming')
 const WORKSPACE = path.join(__dirname, '../c-workspace')
 const SCHEMA_DIR = path.join(WORKSPACE, 'schema')
 const HRPC_DIR = path.join(WORKSPACE, 'hrpc')
+const RAW_WORKSPACE = path.join(__dirname, '../c-workspace-raw')
 const BARE_MAKE = path.join(__dirname, '../../node_modules/.bin/bare-make')
 const CMAKE_FETCH = path.join(__dirname, '../../node_modules/cmake-fetch').replace(/\\/g, '/')
 const TIMEOUT = 180000
@@ -30,6 +31,25 @@ function workspaceCMake(hrpc) {
       // utf is linked explicitly: compact/rpc call libutf inline helpers that
       // stay external in a debug build, so utf's objects must be on the link line.
       `target_link_libraries(hrpc_test PRIVATE ${target} ${schema} rpc compact utf)`
+    ].join('\n') + '\n'
+  )
+}
+
+// Schema-free CMakeLists: only libcompact + librpc, no hyperschema-c/hrpc-c
+// generated target. Used by runCRaw for frames that need just rpc_message_t.
+function rawWorkspaceCMake() {
+  return (
+    [
+      'cmake_minimum_required(VERSION 4.0)',
+      `find_package(cmake-fetch REQUIRED PATHS "${CMAKE_FETCH}")`,
+      'project(hrpc_test_raw C)',
+      'fetch_package("github:holepunchto/libcompact")',
+      'fetch_package("github:holepunchto/librpc")',
+      'add_executable(hrpc_test_raw main.c)',
+      'set_target_properties(hrpc_test_raw PROPERTIES C_STANDARD 99)',
+      // utf is linked explicitly: compact/rpc call libutf inline helpers that
+      // stay external in a debug build, so utf's objects must be on the link line.
+      'target_link_libraries(hrpc_test_raw PRIVATE rpc compact utf)'
     ].join('\n') + '\n'
   )
 }
@@ -83,6 +103,54 @@ function runC(schema, hrpc, mainC) {
   }
 }
 
+// Schema-free variant of runC: links only librpc + libcompact, for drivers
+// that exercise rpc_decode_message/rpc_message_t without any generated
+// hyperschema-c/hrpc-c target.
+function runCRaw(mainC) {
+  fs.mkdirSync(RAW_WORKSPACE, { recursive: true })
+
+  fs.writeFileSync(path.join(RAW_WORKSPACE, 'main.c'), mainC)
+  fs.writeFileSync(path.join(RAW_WORKSPACE, 'CMakeLists.txt'), rawWorkspaceCMake())
+
+  const shell = os.platform() === 'win32'
+
+  const gen = spawnSync(BARE_MAKE, ['generate', '--debug'], {
+    cwd: RAW_WORKSPACE,
+    encoding: 'utf8',
+    timeout: TIMEOUT,
+    shell
+  })
+  if (gen.error || gen.status !== 0) {
+    return { ok: false, stderr: gen.error ? gen.error.message : gen.stdout + gen.stderr }
+  }
+
+  const build = spawnSync(BARE_MAKE, ['build'], {
+    cwd: RAW_WORKSPACE,
+    encoding: 'utf8',
+    timeout: TIMEOUT,
+    shell
+  })
+  if (build.error || build.status !== 0) {
+    return { ok: false, stderr: build.error ? build.error.message : build.stdout + build.stderr }
+  }
+
+  const exe = path.join(
+    RAW_WORKSPACE,
+    'build',
+    os.platform() === 'win32' ? 'hrpc_test_raw.exe' : 'hrpc_test_raw'
+  )
+  const run = spawnSync(exe, [], { encoding: 'utf8', timeout: 10000 })
+  if (run.error) return { ok: false, stderr: run.error.message }
+
+  // bare-subprocess does not honor the `encoding` option the way Node does, so
+  // stdout/stderr can come back as Buffers; normalize to strings for callers.
+  return {
+    ok: run.status === 0,
+    stdout: run.stdout ? run.stdout.toString() : '',
+    stderr: run.stderr ? run.stderr.toString() : ''
+  }
+}
+
 // Format a Buffer as the body of a C array initializer: "1, 42, 0".
 function toCArray(buf) {
   return Array.from(buf).join(', ')
@@ -94,4 +162,4 @@ function parseBytes(line) {
   return Buffer.from(parts.map(Number))
 }
 
-module.exports = { runC, toCArray, parseBytes }
+module.exports = { runC, runCRaw, toCArray, parseBytes }
