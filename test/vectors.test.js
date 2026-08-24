@@ -15,11 +15,12 @@ const PREAMBLE = `
 #include <rpc.h>
 `
 
-// null and a zero-length buffer are indistinguishable on the wire (both encode
-// dataLen 0), so both fixture shapes assert only msg.len == 0.
+// A stream == 0 frame decodes an absent payload to an empty buffer, never to
+// null (hrpc-test WIRE.md, "Payload handling"), so an empty descriptor asserts a
+// non-NULL pointer as well as a zero length.
 function assertData(data) {
   if (data === null || data.length === 0) {
-    return 'assert(msg.len == 0);'
+    return ['assert(msg.len == 0);', 'assert(msg.data != NULL);'].join('\n  ')
   }
   const bytes = Buffer.from(data, 'hex')
   return [
