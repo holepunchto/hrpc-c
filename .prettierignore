@@ -1,2 +1,3 @@
 *.snapshot.*
 test/c-workspace/js-schema/
+.superpowers/
