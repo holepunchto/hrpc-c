@@ -6,9 +6,7 @@ const CHyperschema = require('hyperschema-c')
 const CHRPC = require('..')
 const { runCRaw, runC, toCArray } = require('./helpers/c')
 
-// hrpc-test is Node-only (no Bare imports map): require() throws under bare, so skip the file.
-const isBare = typeof Bare !== 'undefined'
-const isWindows = !isBare && process.platform === 'win32'
+const isWindows = (typeof Bare === 'undefined' ? process.platform : Bare.platform) === 'win32'
 
 const PREAMBLE = `
 #include <assert.h>
@@ -96,7 +94,7 @@ main (void) {
 `
 }
 
-if (!isBare) {
+{
   const { loadFamily } = require('hrpc-test')
 
   for (const family of ['envelope', 'error', 'boundary']) {
