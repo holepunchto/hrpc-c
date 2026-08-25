@@ -15,11 +15,13 @@ const PREAMBLE = `
 #include <rpc.h>
 `
 
-// A stream == 0 frame decodes an absent payload to an empty buffer, never to
-// null (hrpc-test WIRE.md, "Payload handling"), so an empty descriptor asserts a
-// non-NULL pointer as well as a zero length.
+// The descriptor pins the payload exactly, so compare against it rather than
+// re-deriving the rule: null where the wire carries no dataLen at all, and an
+// empty string where it carries a zero-length one, which decodes to a non-NULL
+// pointer (hrpc-test WIRE.md, "Payload handling").
 function assertData(data) {
-  if (data === null || data.length === 0) {
+  if (data === null) return 'assert(msg.data == NULL);'
+  if (data.length === 0) {
     return ['assert(msg.len == 0);', 'assert(msg.data != NULL);'].join('\n  ')
   }
   const bytes = Buffer.from(data, 'hex')
@@ -62,27 +64,17 @@ function decodeDriver(hex, descriptor) {
     `assert(msg.id == ${descriptor.id});`
   ]
 
-  if (descriptor.type === 1) {
-    lines.push(`assert(msg.command == ${descriptor.command});`)
-    lines.push(`assert(msg.stream == ${descriptor.stream});`)
-    if (descriptor.stream === 0) lines.push(assertData(descriptor.data))
-  } else if (descriptor.type === 2) {
-    lines.push(`assert(msg.stream == ${descriptor.stream});`)
-    if (descriptor.error) {
-      lines.push('assert(msg.error == true);')
-      lines.push(assertError(descriptor.error))
-    } else {
-      lines.push('assert(msg.error == false);')
-      if (descriptor.stream === 0) lines.push(assertData(descriptor.data))
-    }
-  } else if (descriptor.type === 3) {
-    lines.push(`assert(msg.stream == ${descriptor.stream});`)
-    if (descriptor.error) {
-      lines.push(assertError(descriptor.error))
-    } else if (descriptor.stream & 0x10) {
-      lines.push(assertData(descriptor.data))
-    }
+  lines.push(`assert(msg.stream == ${descriptor.stream});`)
+
+  // What remains type-specific is librpc's struct, not the wire: only requests
+  // carry a command, and only responses carry the error flag.
+  if ('command' in descriptor) lines.push(`assert(msg.command == ${descriptor.command});`)
+  if (descriptor.type === 2) {
+    lines.push(`assert(msg.error == ${descriptor.error ? 'true' : 'false'});`)
   }
+
+  if (descriptor.error) lines.push(assertError(descriptor.error))
+  else lines.push(assertData(descriptor.data))
 
   lines.push('printf("ok\\n");')
 
