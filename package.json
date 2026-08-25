@@ -65,7 +65,7 @@
     "bare-subprocess": "^6.0.0",
     "brittle": "^3.7.0",
     "compact-encoding": "^3.0.0",
-    "hrpc-test": "^0.1.0",
+    "hrpc-test": "^0.2.0",
     "hyperschema": "^1.20.1",
     "hyperschema-c": "^0.4.0",
     "lunte": "^1.8.0",
