@@ -64,8 +64,6 @@ Every `*_encode_*` heap-allocates `*out` (the caller frees). Decoded views (`hrp
 
 Dispatch only sees the inbound request that opens a conversation. Subsequent stream frames carry only a stream id (not a command), so routing them by id - and the open handshake, flow control, and lifecycle - is the caller's responsibility (a job for a stateful client runtime such as `librpc`'s `rpc_client_t`).
 
-See [`SPEC.md`](./SPEC.md) for the full design.
-
 ## License
 
 Apache-2.0
