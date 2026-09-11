@@ -88,10 +88,17 @@ main (void) {
 }
 
 {
-  const { loadFamily } = require('hrpc-test')
+  const { families, loadFamily } = require('hrpc-test')
 
-  for (const family of ['envelope', 'error', 'boundary']) {
+  // A family the C decoder cannot drive goes here with the reason, so a gap is
+  // declared rather than silently absent.
+  const UNSUPPORTED = {}
+
+  const exercised = new Set()
+
+  for (const family of families.filter((f) => !(f in UNSUPPORTED))) {
     const { messages, frames } = loadFamily(family)
+    exercised.add(family)
     for (let i = 0; i < frames.length; i++) {
       const { note, descriptor } = messages[i]
       test(`C decodes ${family}[${i}] - ${note}`, { skip: isWindows }, (t) => {
@@ -101,6 +108,12 @@ main (void) {
       })
     }
   }
+
+  test('every corpus family is exercised or declared unsupported', (t) => {
+    t.ok(families.length > 0, 'hrpc-test ships families')
+    const unaccounted = families.filter((f) => !exercised.has(f) && !(f in UNSUPPORTED))
+    t.alike(unaccounted, [], 'no family is silently skipped')
+  })
 
   // Load hrpc-test's frozen fixtures/dispatch/{schema,hrpc} directly - no hand-copied schema to drift.
   const HRPC_TEST_DIR = path.dirname(require.resolve('hrpc-test'))
